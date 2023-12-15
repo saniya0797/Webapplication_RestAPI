@@ -1,0 +1,130 @@
+name: packer-build_testing
+#on:
+#  pull_request_target:
+#    types:
+#      - closed
+#
+#jobs:
+#  if_merged:
+#    if: github.event.pull_request.merged == true
+#    runs-on: ubuntu-latest
+
+on:
+  pull_request:
+    branches:
+      - main
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      - name: Set up AWS CLI
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_SECRET_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup up java
+        uses: actions/setup-java@v3
+        with:
+          java-version: '20'
+          distribution: 'adopt'
+
+      - name : Verify java version
+        run : java -version
+
+      - name : Verify maven version
+        run : mvn -version
+
+      #          skip-checks: true
+
+      - name: Set up MariaDB
+        uses: getong/mariadb-action@v1.1
+        with:
+          host port: ${{ secrets.DB_PORT }}
+          mysql database: ${{ secrets.DB_NAME }}
+          mysql user: ${{ secrets.DB_USER }}
+          mysql root password: ${{ secrets.DB_PASSWORD }}
+
+      #          skip-checks: true
+
+
+      - name: Build with Maven
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_PASS: ${{ secrets.DB_PASSWORD }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          FILE_PATH: spring-boot/users.csv
+        run: |
+          cd spring-boot
+          mvn clean verify
+          
+
+
+      - name: Packer Init
+        working-directory: ./packer_app
+        run: packer init .
+
+      - name: Build AMI
+        working-directory: ./packer_app
+        run: packer build -var "source_path_jar=../spring-boot/target/spring-boot-0.0.1-SNAPSHOT.jar" ami_packer.pkr.hcl
+
+  aws_launch_template:
+    name: AWS Launch Template
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_DEMO }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEMO }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Launch Template
+        run: |
+          latestAmi=$(aws ec2 describe-images --filters "Name=owner-id,Values=538060352558" --query "sort_by(Images, &CreationDate)[-1].[ImageId]" --output "text")
+          echo "latest ami:"
+          echo $latestAmi
+          latestLaunchTemplateId=$(aws ec2 describe-launch-templates --query "sort_by(LaunchTemplates, &CreateTime)[-1].[LaunchTemplateId]" --output "text")
+          if [[ ${latestLaunchTemplateId} != 'None' ]]; then
+            echo "latest template id:"
+            echo $latestLaunchTemplateId
+            latestAutoScalingGroupName=$(aws autoscaling describe-auto-scaling-groups --query "sort_by(AutoScalingGroups, &CreatedTime)[-1].[AutoScalingGroupName]" --output "text")
+            echo "latest AutoScalingGroupName:"
+            echo $latestAutoScalingGroupName
+            latestVersion=$(aws ec2 describe-launch-templates --launch-template-id $latestLaunchTemplateId --query "sort_by(LaunchTemplates, &CreateTime)[-1].[LatestVersionNumber]" --output "text")
+            echo "latestVersion:"
+            echo $latestVersion
+          
+            aws ec2 create-launch-template-version --launch-template-id $latestLaunchTemplateId --version-description latest --source-version 1 --launch-template-data "ImageId=$latestAmi"
+            aws autoscaling start-instance-refresh --auto-scaling-group-name $latestAutoScalingGroupName --preferences "InstanceWarmup=200"
+            sleep 60
+          fi
+
+      - name: Wait for instance refresh to complete
+        run: |
+          instance_refresh_status=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name ${{ secrets.AUTO_SCALING_GROUP_NAME }} --query "InstanceRefreshes[?StartTime!=null] | sort_by(@, &StartTime)[-1].Status" --output "text")
+          while [ "$instance_refresh_status" != "Successful" ]
+          do
+            echo "Instance refresh status: $instance_refresh_status"
+            sleep 10
+            instance_refresh_status=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name ${{ secrets.AUTO_SCALING_GROUP_NAME }}  --query "InstanceRefreshes[?StartTime!=null] | sort_by(@, &StartTime)[-1].Status" --output text)
+            if [ "$instance_refresh_status" == "Failed" ] || [ "$instance_refresh_status" == "Cancelled" ]
+            then
+              echo "Instance refresh failed or cancelled"
+              exit 1
+            fi
+          done
+          echo "Instance refresh status: $instance_refresh_status"
+          echo "Instance refresh completed successfully"
+
+
+
+
+

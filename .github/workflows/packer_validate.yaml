@@ -1,0 +1,42 @@
+name: packer_validate
+
+on:
+  pull_request:
+    branches:
+      - main
+env:
+  PRODUCT_VERSION: "latest"
+
+jobs:
+  check_packer_template:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: RunPacker init
+        working-directory: ./packer_app
+        id: init
+        run: packer init ami_packer.pkr.hcl
+
+      - name: Packer format
+        working-directory: ./packer_app
+        run: |
+          # Run packer fmt and capture the output
+          output=$(packer fmt -check=true -write=false ami_packer.pkr.hcl)
+          if [ -n "$output" ]; then
+            echo "Packer format check failed. Please run 'packer fmt' to fix the formatting issues."
+            echo "$output"
+            exit 1
+          fi
+
+
+      - name: RunPacker validate
+        working-directory: ./packer_app
+        id: validate
+        run: packer validate ami_packer.pkr.hcl
+
+
+
+
